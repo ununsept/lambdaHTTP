@@ -1,14 +1,26 @@
 module Engine
-    ( parsHTTP
+    ( startServer
     ) where
 
-import System.FilePath.Windows  ( takeExtension   )
-import Data.List.Split          ( splitOneOf      )
-import Data.Text.Unsafe         ( inlinePerformIO )
-import System.Directory         ( doesFileExist   )
+import           System.FilePath.Windows       (takeExtension)
+import           Data.List.Split               (splitOneOf)
+import           Data.Text.Unsafe              (inlinePerformIO)
+import           System.Directory              (doesFileExist)
+import           System.IO                     (FilePath, appendFile)
+import           Network.Socket
+import           Control.Concurrent            (forkIO)
+import           Control.Monad                 (forever)
+import           System.Time                   (getClockTime)
+import qualified Data.ByteString          as B
+import qualified Data.ByteString.Internal as B (ByteString)
+import qualified Data.ByteString.Char8    as Bp(pack)
+import           Network.Socket.ByteString     (sendAll, send)
+import           Configuration                 (Config (..))
 
-
-import Configuration            ( Config (..)     )
+data StatusCodes =
+    OK
+  | NotFound
+  deriving (Show)
 
 getMimeType :: FilePath -> String
 getMimeType file = case (takeExtension file) of
@@ -76,11 +88,6 @@ getMimeType file = case (takeExtension file) of
     ".7z"     -> "application/x-7z-compressed"
     otherwise -> "application/octet-stream"
 
-data StatusCodes =
-      OK
-    | NotFound
-    deriving (Show)
-
 readFileUnsafe :: FilePath -> String
 readFileUnsafe fileNane = inlinePerformIO $ readFile fileNane
 
@@ -89,14 +96,21 @@ getStatus status = case status of
     OK       -> "HTTP/1.1 200 OK\n\r"
     NotFound -> "HTTP/1.1 404 Not Found\n\r"
 
-request :: Config -> StatusCodes ->  FilePath -> String
-request conf status path =
-       getStatus status
-    ++ "Content-Length: " ++ (show $ length $ readFileUnsafe path) ++ "\n\r"
-    ++ "Content-Type: "   ++ (getMimeType path)
-    ++ "\n\r\n\r"         ++ (readFileUnsafe path)
+requestHeader :: Config -> StatusCodes -> String
+requestHeader conf status =
+    (getStatus status)
 
-requestGet :: Config -> [String] -> String
+request :: Config -> StatusCodes ->  FilePath -> IO B.ByteString
+request conf status path = do
+    file <- B.readFile path
+    return $ B.append
+          (Bp.pack((requestHeader conf status) ++ (contentHeader file))) file
+    where contentHeader :: B.ByteString -> String
+          contentHeader file =
+            "Content-Length: " ++ (show $ B.length file) ++ "\n\r"
+            ++ "Content-Type: "   ++ (getMimeType path) ++ "\n\r\n\r"
+
+requestGet :: Config -> [String] -> IO B.ByteString
 requestGet conf (path:_:_:host) =
     if (inlinePerformIO $ doesFileExist pathFile)
         then request conf OK        pathFile
@@ -106,17 +120,45 @@ requestGet conf (path:_:_:host) =
               then (rootDirectory conf) ++ (indexFile conf)
               else (rootDirectory conf) ++ head (splitOneOf "?" path)
 
-processHTTP :: Config -> [String] -> String
-processHTTP conf (verb:x) = case verb of
+parsHTTP :: Config -> [String] -> IO B.ByteString
+parsHTTP conf (verb:x) = case verb of
     "GET"     -> requestGet conf (take 4 x)
     "POST"    -> requestGet conf (take 4 x)
     --otherwise -> expression
 
-parsHTTP :: Config -> String -> String
-parsHTTP conf query = processHTTP conf $
+processHTTP :: Config -> String -> IO B.ByteString
+processHTTP conf query = parsHTTP conf $
           removeEmpytElement(splitOneOf " \n\r" query)
     where removeEmpytElement :: [String] -> [String]
           removeEmpytElement []     = []
           removeEmpytElement (x:xs) = if x == ""
             then removeEmpytElement xs
             else x : removeEmpytElement xs
+
+loger :: Config -> SockAddr -> String -> IO ()
+loger conf addr request = do
+    time <- getClockTime
+    if (saveLog conf)
+        then appendFile (fileLog conf) $
+            (show addr) ++ " = " ++ (show time) ++ "\n" ++ request
+        else putStrLn $
+            (show addr) ++ " = " ++ (show time) ++ "\n" ++ request
+
+connection :: (Socket, SockAddr) -> Config  -> IO ()
+connection (sock, addr) conf = do
+    request <- recv sock 100000
+    loger conf addr request
+    content <- (processHTTP conf request)
+    print content
+    sendAll sock content
+    close sock
+
+
+startServer :: Config -> IO ()
+startServer conf = do
+    sock <- socket AF_INET Stream 0
+    bind sock (SockAddrInet (fromIntegral (port conf)) iNADDR_ANY)
+    listen sock (maxListen conf)
+    forever $ do
+        connect <- accept sock
+        connection connect conf
