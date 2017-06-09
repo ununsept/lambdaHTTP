@@ -1,9 +1,12 @@
 module Configuration
     ( Config (..)
+    , Mime
     , defaultConfig
     ) where
 
 import System.IO                ( FilePath )
+
+type Mime = String
 
 data Config = Config
     { port          :: Int
@@ -13,6 +16,7 @@ data Config = Config
     , status404     :: FilePath
     , rootDirectory :: FilePath
     , indexFile     :: FilePath
+    , blackList     :: [Mime]
     }
 
 defaultConfig :: Config
@@ -24,4 +28,5 @@ defaultConfig = Config
     , status404     = "error.html"
     , rootDirectory = "."
     , indexFile     = "/index.html"
+    , blackList     = []
     }

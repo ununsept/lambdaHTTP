@@ -14,15 +14,15 @@ import           System.Time                   (getClockTime)
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Internal as B (ByteString)
 import qualified Data.ByteString.Char8    as Bp(pack)
-import qualified Network.Socket.ByteString as BN --    (sendAll)--, send)
-import           Configuration                 (Config (..))
+import           Network.Socket.ByteString     (sendAll)
+import           Configuration
 
 data StatusCodes =
     OK
   | NotFound
   deriving (Show)
 
-getMimeType :: FilePath -> String
+getMimeType :: FilePath -> Mime
 getMimeType file = case (takeExtension file) of
     ".bmp"    -> "image/bmp"
     ".css"    -> "text/css"
@@ -96,25 +96,28 @@ getStatus status = case status of
     OK       -> "HTTP/1.1 200 OK\r\n"
     NotFound -> "HTTP/1.1 404 Not Found\r\n"
 
---    (getStatus status)
-
 requestHeader :: Config -> StatusCodes -> FilePath -> String
 requestHeader conf status path =
     (getStatus status) ++ (contentHeader)
-    where contentHeader :: String
+    where
+          contentHeader :: String
           contentHeader =
             "Content-Length: "  ++ (show $ lengthFileUnsafe path) ++ "\r\n"
             ++ "Content-Type: " ++ (getMimeType path) ++ "\r\n\r\n"
 
 requestGet :: Config -> [String] -> (String, FilePath)
 requestGet conf (path:_:_:host) =
-    if (inlinePerformIO $ doesFileExist pathFile)
+    if (inlinePerformIO $ doesFileExist pathFile) && blackListVerification
         then (requestHeader conf OK       pathFile        , pathFile)
-        else (requestHeader conf NotFound (status404 conf), pathFile)
-    where pathFile :: String
+        else (requestHeader conf NotFound (status404 conf), (status404 conf))
+    where
+          pathFile :: String
           pathFile = if head (splitOneOf "?" path) == "/"
               then (rootDirectory conf) ++ (indexFile conf)
               else (rootDirectory conf) ++ head (splitOneOf "?" path)
+          blackListVerification :: Bool
+          blackListVerification =
+              filter (getMimeType pathFile ==) (blackList conf) == []
 
 parsHTTP :: Config -> [String] -> (String, FilePath)
 parsHTTP conf (verb:x) = case verb of
@@ -125,20 +128,12 @@ parsHTTP conf (verb:x) = case verb of
 processHTTP :: Config -> String -> (String, FilePath)
 processHTTP conf query = parsHTTP conf $
           removeEmpytElement(splitOneOf " \n\r" query)
-    where removeEmpytElement :: [String] -> [String]
+    where
+          removeEmpytElement :: [String] -> [String]
           removeEmpytElement []     = []
           removeEmpytElement (x:xs) = if x == ""
             then removeEmpytElement xs
             else x : removeEmpytElement xs
-
-requestSend :: Socket -> (String, FilePath) -> IO ()
-requestSend sock (header, fileName) = do
-    print header
-    send sock header
-    asdf <- B.readFile fileName
-    BN.send sock asdf
-    close sock
-
 
 loger :: Config -> SockAddr -> String -> IO ()
 loger conf addr request = do
@@ -148,6 +143,14 @@ loger conf addr request = do
             (show addr) ++ " = " ++ (show time) ++ "\n" ++ request
         else putStrLn $
             (show addr) ++ " = " ++ (show time) ++ "\n" ++ request
+
+requestSend :: Socket -> (String, FilePath) -> IO ()
+requestSend sock (header, fileName) = do
+    print header
+    send sock header
+    asdf <- B.readFile fileName
+    sendAll sock asdf
+    close sock
 
 startServer :: Config -> IO ()
 startServer conf = do
