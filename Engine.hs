@@ -14,7 +14,7 @@ import           System.Time                   (getClockTime)
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Internal as B (ByteString)
 import qualified Data.ByteString.Char8    as Bp(pack)
-import           Network.Socket.ByteString     (sendAll, send)
+import qualified Network.Socket.ByteString as BN --    (sendAll)--, send)
 import           Configuration                 (Config (..))
 
 data StatusCodes =
@@ -88,45 +88,41 @@ getMimeType file = case (takeExtension file) of
     ".7z"     -> "application/x-7z-compressed"
     otherwise -> "application/octet-stream"
 
-readFileUnsafe :: FilePath -> String
-readFileUnsafe fileNane = inlinePerformIO $ readFile fileNane
+lengthFileUnsafe :: FilePath -> Int
+lengthFileUnsafe file = (B.length $ inlinePerformIO $ B.readFile file)
 
 getStatus :: StatusCodes -> String
 getStatus status = case status of
-    OK       -> "HTTP/1.1 200 OK\n\r"
-    NotFound -> "HTTP/1.1 404 Not Found\n\r"
+    OK       -> "HTTP/1.1 200 OK\r\n"
+    NotFound -> "HTTP/1.1 404 Not Found\r\n"
 
-requestHeader :: Config -> StatusCodes -> String
-requestHeader conf status =
-    (getStatus status)
+--    (getStatus status)
 
-request :: Config -> StatusCodes ->  FilePath -> IO B.ByteString
-request conf status path = do
-    file <- B.readFile path
-    return $ B.append
-          (Bp.pack((requestHeader conf status) ++ (contentHeader file))) file
-    where contentHeader :: B.ByteString -> String
-          contentHeader file =
-            "Content-Length: " ++ (show $ B.length file) ++ "\n\r"
-            ++ "Content-Type: "   ++ (getMimeType path) ++ "\n\r\n\r"
+requestHeader :: Config -> StatusCodes -> FilePath -> String
+requestHeader conf status path =
+    (getStatus status) ++ (contentHeader)
+    where contentHeader :: String
+          contentHeader =
+            "Content-Length: "  ++ (show $ lengthFileUnsafe path) ++ "\r\n"
+            ++ "Content-Type: " ++ (getMimeType path) ++ "\r\n\r\n"
 
-requestGet :: Config -> [String] -> IO B.ByteString
+requestGet :: Config -> [String] -> (String, FilePath)
 requestGet conf (path:_:_:host) =
     if (inlinePerformIO $ doesFileExist pathFile)
-        then request conf OK        pathFile
-        else request conf NotFound  (status404 conf)
+        then (requestHeader conf OK       pathFile        , pathFile)
+        else (requestHeader conf NotFound (status404 conf), pathFile)
     where pathFile :: String
           pathFile = if head (splitOneOf "?" path) == "/"
               then (rootDirectory conf) ++ (indexFile conf)
               else (rootDirectory conf) ++ head (splitOneOf "?" path)
 
-parsHTTP :: Config -> [String] -> IO B.ByteString
+parsHTTP :: Config -> [String] -> (String, FilePath)
 parsHTTP conf (verb:x) = case verb of
     "GET"     -> requestGet conf (take 4 x)
     "POST"    -> requestGet conf (take 4 x)
     --otherwise -> expression
 
-processHTTP :: Config -> String -> IO B.ByteString
+processHTTP :: Config -> String -> (String, FilePath)
 processHTTP conf query = parsHTTP conf $
           removeEmpytElement(splitOneOf " \n\r" query)
     where removeEmpytElement :: [String] -> [String]
@@ -134,6 +130,15 @@ processHTTP conf query = parsHTTP conf $
           removeEmpytElement (x:xs) = if x == ""
             then removeEmpytElement xs
             else x : removeEmpytElement xs
+
+requestSend :: Socket -> (String, FilePath) -> IO ()
+requestSend sock (header, fileName) = do
+    print header
+    send sock header
+    asdf <- B.readFile fileName
+    BN.send sock asdf
+    close sock
+
 
 loger :: Config -> SockAddr -> String -> IO ()
 loger conf addr request = do
@@ -144,21 +149,13 @@ loger conf addr request = do
         else putStrLn $
             (show addr) ++ " = " ++ (show time) ++ "\n" ++ request
 
-connection :: (Socket, SockAddr) -> Config  -> IO ()
-connection (sock, addr) conf = do
-    request <- recv sock 100000
-    loger conf addr request
-    content <- (processHTTP conf request)
-    print content
-    sendAll sock content
-    close sock
-
-
 startServer :: Config -> IO ()
 startServer conf = do
     sock <- socket AF_INET Stream 0
     bind sock (SockAddrInet (fromIntegral (port conf)) iNADDR_ANY)
     listen sock (maxListen conf)
     forever $ do
-        connect <- accept sock
-        connection connect conf
+        (sock, addr) <- accept sock
+        request      <- recv sock 100000
+        requestSend sock $ processHTTP conf request
+        loger conf addr request
