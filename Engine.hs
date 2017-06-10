@@ -3,6 +3,7 @@ module Engine
     ) where
 
 import           System.FilePath.Windows       (takeExtension)
+import           Data.List                     (elemIndex, findIndex)
 import           Data.List.Split               (splitOneOf)
 import           Data.Text.Unsafe              (inlinePerformIO)
 import           System.Directory              (doesFileExist)
@@ -106,18 +107,30 @@ requestHeader conf status path =
             ++ "Content-Type: " ++ (getMimeType path) ++ "\r\n\r\n"
 
 requestGet :: Config -> [String] -> (String, FilePath)
-requestGet conf (path:_:_:host) =
+requestGet conf (path:_:_:host:_) = case searchHost of
+    Just a  -> requestMake conf a path
+    Nothing -> (requestHeader conf NotFound (status404 conf), status404 conf)
+    where
+          searchHost :: Maybe Int
+          searchHost = elemIndex True $ map ((host ==) . fst) (domain conf)
+
+requestMake :: Config -> Int -> FilePath -> (String, FilePath)
+requestMake  conf hostNum path =
     if (inlinePerformIO $ doesFileExist pathFile) && blackListVerification
         then (requestHeader conf OK       pathFile        , pathFile)
-        else (requestHeader conf NotFound (status404 conf), (status404 conf))
+        else (requestHeader conf NotFound (status404 conf), status404 conf)
     where
-          pathFile :: String
+          pathFile :: FilePath
           pathFile = if head (splitOneOf "?" path) == "/"
-              then (rootDirectory conf) ++ (indexFile conf)
-              else (rootDirectory conf) ++ head (splitOneOf "?" path)
+              then (snd domainConf) ++ (indexFile conf)
+              else (snd domainConf) ++ head (splitOneOf "?" path)
           blackListVerification :: Bool
           blackListVerification =
               filter (getMimeType pathFile ==) (blackList conf) == []
+          domainConf :: (String,FilePath)
+          domainConf = (domain conf) !! hostNum
+          status404File :: FilePath
+          status404File = status404 conf
 
 parsHTTP :: Config -> [String] -> (String, FilePath)
 parsHTTP conf (verb:x) = case verb of
