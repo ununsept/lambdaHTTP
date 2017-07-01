@@ -2,26 +2,32 @@ module Engine
     ( startServer
     ) where
 
-import           System.FilePath.Windows       (takeExtension)
-import           Data.List                     (elemIndex, findIndex)
-import           Data.List.Split               (splitOneOf)
-import           Data.Text.Unsafe              (inlinePerformIO)
-import           System.Directory              (doesFileExist)
-import           System.IO                     (FilePath, appendFile)
-import           Network.Socket
 import           Control.Concurrent            (forkIO)
 import           Control.Monad                 (forever)
+import           Data.List                     (elemIndex, findIndex, concat)
+import           Data.List.Split               (splitOneOf)
+import           Data.Time.Clock               (getCurrentTime, utctDay)
+import           Data.Time.Calendar            (toGregorian)
+import           Data.Text.Unsafe              (inlinePerformIO)
+import           Network.Socket
+import           Network.Socket.ByteString     (sendAll)
+import           System.Directory              (doesFileExist)
+import           System.FilePath.Windows       (takeExtension)
+import           System.IO                     (FilePath, appendFile)
 import           System.Time                   (getClockTime)
 import qualified Data.ByteString          as B
 import qualified Data.ByteString.Internal as B (ByteString)
-import qualified Data.ByteString.Char8    as Bp(pack)
-import           Network.Socket.ByteString     (sendAll)
+
 import           Configuration
 
 data StatusCodes =
-    OK
-  | NotFound
-  deriving (Show)
+      OK
+    | NotFound
+    deriving (Show)
+
+data Fields = Fields
+    { hostField :: Maybe String
+    } deriving (Show)
 
 getMimeType :: FilePath -> Mime
 getMimeType file = case (takeExtension file) of
@@ -92,27 +98,65 @@ getMimeType file = case (takeExtension file) of
 lengthFileUnsafe :: FilePath -> Int
 lengthFileUnsafe file = (B.length $ inlinePerformIO $ B.readFile file)
 
+
+ -- Sun, 06 Nov 1994 08:49:37 GMT
+date :: String
+date = undefined
+    where
+          dateLocal :: IO (Integer,Int,Int)
+          dateLocal = getCurrentTime >>= return . toGregorian . utctDay
+
 getStatus :: StatusCodes -> String
 getStatus status = case status of
     OK       -> "HTTP/1.1 200 OK\r\n"
     NotFound -> "HTTP/1.1 404 Not Found\r\n"
 
+headers :: Config -> String
+headers conf = concat
+    [ contentLanguageHeder
+    , serverHeder
+    ]
+    where
+          hederConf :: Header
+          hederConf = header conf
+          contentLanguageHeder :: String
+          contentLanguageHeder = case contentLanguage hederConf of
+              Just a  -> "Content-Language: " ++ a ++  "\r\n"
+              Nothing -> ""
+          serverHeder :: String
+          serverHeder = case contentLanguage hederConf of
+              Just a  -> "Host: " ++ a ++  "\r\n"
+              Nothing -> ""
+
 requestHeader :: Config -> StatusCodes -> FilePath -> String
 requestHeader conf status path =
-    (getStatus status) ++ (contentHeader)
+    (getStatus status) ++ (localHeader)
     where
-          contentHeader :: String
-          contentHeader =
+          localHeader :: String
+          localHeader = (headers conf) ++
             "Content-Length: "  ++ (show $ lengthFileUnsafe path) ++ "\r\n"
             ++ "Content-Type: " ++ (getMimeType path) ++ "\r\n\r\n"
 
+parsFields :: [String] -> Fields
+parsFields = foundField Fields { hostField = Nothing
+                               }
+    where
+          foundField :: Fields -> [String] -> Fields
+          foundField f []              = f
+          foundField f ("Host:":x:xs) = foundField (f {hostField = Just x}) xs
+          foundField f (_:x)          = foundField f x
+
 requestGet :: Config -> [String] -> (String, FilePath)
-requestGet conf (path:_:_:host:_) = case searchHost of
+requestGet conf (path:field) = case searchHost of
     Just a  -> requestMake conf a path
     Nothing -> (requestHeader conf NotFound (status404 conf), status404 conf)
     where
           searchHost :: Maybe Int
-          searchHost = elemIndex True $ map ((host ==) . fst) (domain conf)
+          searchHost = case (hostField $ parsFields field) of
+              Just a   -> elemIndex True $ map ((a ==) . fst) (domain conf)
+              Nothing  -> Nothing
+          status404File :: FilePath
+          status404File = unknownDomain conf ++ status404 conf
 
 requestMake :: Config -> Int -> FilePath -> (String, FilePath)
 requestMake  conf hostNum path =
@@ -134,8 +178,8 @@ requestMake  conf hostNum path =
 
 parsHTTP :: Config -> [String] -> (String, FilePath)
 parsHTTP conf (verb:x) = case verb of
-    "GET"     -> requestGet conf (take 4 x)
-    "POST"    -> requestGet conf (take 4 x)
+    "GET"     -> requestGet conf x
+    "POST"    -> requestGet conf x
     --otherwise -> expression
 
 processHTTP :: Config -> String -> (String, FilePath)
@@ -151,10 +195,10 @@ processHTTP conf query = parsHTTP conf $
 loger :: Config -> SockAddr -> String -> IO ()
 loger conf addr request = do
     time <- getClockTime
-    if (saveLog conf)
-        then appendFile (fileLog conf) $
+    case fileLog conf of
+        Just file -> appendFile file $
             (show addr) ++ " = " ++ (show time) ++ "\n" ++ request
-        else putStrLn $
+        Nothing -> putStrLn $
             (show addr) ++ " = " ++ (show time) ++ "\n" ++ request
 
 requestSend :: Socket -> (String, FilePath) -> IO ()
@@ -165,6 +209,12 @@ requestSend sock (header, fileName) = do
     sendAll sock asdf
     close sock
 
+conect :: Config -> Socket -> SockAddr -> IO ()
+conect conf sock addr = do
+    request         <- recv sock 100000
+    requestSend sock $ processHTTP conf request
+    loger conf addr request
+
 startServer :: Config -> IO ()
 startServer conf = do
     sock <- socket AF_INET Stream 0
@@ -172,6 +222,4 @@ startServer conf = do
     listen sock (maxListen conf)
     forever $ do
         (sock, addr) <- accept sock
-        request      <- recv sock 100000
-        requestSend sock $ processHTTP conf request
-        loger conf addr request
+        forkIO $ conect conf sock addr
