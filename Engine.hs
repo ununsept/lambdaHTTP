@@ -29,6 +29,8 @@ data Fields = Fields
     { hostField :: Maybe String
     } deriving (Show)
 
+
+
 lengthFileUnsafe :: FilePath -> Int
 lengthFileUnsafe file = (B.length $ inlinePerformIO $ B.readFile file)
 
@@ -40,19 +42,42 @@ date = undefined
           dateLocal :: IO (Integer,Int,Int)
           dateLocal = getCurrentTime >>= return . toGregorian . utctDay
 
+defaultFields :: Fields
+defaultFields = Fields
+    { hostField = Nothing
+    }
+
+split :: String -> [String]
+split s = removeEmpytElement(splitOneOf " \n\r" s)
+    where
+          removeEmpytElement :: [String] -> [String]
+          removeEmpytElement []     = []
+          removeEmpytElement (x:xs) = if x == ""
+              then removeEmpytElement xs
+              else x : removeEmpytElement xs
+
+ignoreLR :: String -> String
+ignoreLR x = if last x == '\r'
+  then init x
+  else x
+
+splitTwo :: Char ->  String -> (String,String)
+splitTwo _ []     = ("","")
+splitTwo d (x:xs) = if d == x
+    then ("",xs)
+    else (x:fst (splitTwo d xs), snd (splitTwo d xs))
+
 getStatus :: StatusCodes -> String
 getStatus status = case status of
     OK       -> "HTTP/1.1 200 OK\r\n"
     NotFound -> "HTTP/1.1 404 Not Found\r\n"
 
-headers :: Config -> String
-headers conf = concat
+headers :: Header -> String
+headers hederConf = concat
     [ contentLanguageHeder
     , serverHeder
     ]
     where
-          hederConf :: Header
-          hederConf = header conf
           contentLanguageHeder :: String
           contentLanguageHeder = case contentLanguage hederConf of
               Just a  -> "Content-Language: " ++ a ++  "\r\n"
@@ -67,26 +92,29 @@ requestHeader conf status path =
     (getStatus status) ++ (localHeader)
     where
           localHeader :: String
-          localHeader = (headers conf) ++
+          localHeader = (headers $ header conf) ++
             "Content-Length: "  ++ (show $ lengthFileUnsafe path) ++ "\r\n"
             ++ "Content-Type: " ++ (getMimeType path) ++ "\r\n\r\n"
 
-parsFields :: [String] -> Fields
-parsFields = foundField Fields { hostField = Nothing
-                               }
-    where
-          foundField :: Fields -> [String] -> Fields
-          foundField f []              = f
-          foundField f ("Host:":x:xs) = foundField (f {hostField = Just x}) xs
-          foundField f (_:x)          = foundField f x
 
-requestGet :: Config -> [String] -> (String, FilePath)
-requestGet conf (path:field) = case searchHost of
+
+parsFields :: [String] -> Fields  -> Fields
+parsFields []     f = f
+parsFields (x:xs) f = parsFields xs (foundField f x)
+    where
+          foundField :: Fields -> String -> Fields
+          foundField fields field = parsField fields (splitTwo ' ' field)
+          parsField :: Fields -> (String, String) -> Fields
+          parsField fields ("Host:", x) = fields { hostField = Just  x }
+          parsField fields (_, _)       = fields
+
+requestGet :: Config -> String -> [String] -> (String, FilePath)
+requestGet conf path field = case searchHost of
     Just a  -> requestMake conf a path
     Nothing -> (requestHeader conf NotFound (status404 conf), status404 conf)
     where
           searchHost :: Maybe Int
-          searchHost = case (hostField $ parsFields field) of
+          searchHost = case (hostField $ parsFields field defaultFields) of
               Just a   -> elemIndex True $ map ((a ==) . fst) (domain conf)
               Nothing  -> Nothing
           status404File :: FilePath
@@ -110,21 +138,23 @@ requestMake  conf hostNum path =
           status404File :: FilePath
           status404File = status404 conf
 
-parsHTTP :: Config -> [String] -> (String, FilePath)
-parsHTTP conf (verb:x) = case verb of
-    "GET"     -> requestGet conf x
-    "POST"    -> requestGet conf x
+parsHTTP :: Config -> [String] -> [String] -> (String, FilePath)
+parsHTTP conf (verb:filePath:_) fields = case verb of
+    "GET"     -> requestGet conf filePath fields
+    "POST"    -> requestGet conf filePath fields
     --otherwise -> expression
 
-processHTTP :: Config -> String -> (String, FilePath)
-processHTTP conf query = parsHTTP conf $
-          removeEmpytElement(splitOneOf " \n\r" query)
+checkHTTP :: Config -> [String] -> (String, FilePath)
+checkHTTP conf (heading:fields) = case last $ headingSplit of
+    "HTTP/1.1" -> parsHTTP conf (init headingSplit) (map ignoreLR fields)
+    otherwise  -> undefined
     where
-          removeEmpytElement :: [String] -> [String]
-          removeEmpytElement []     = []
-          removeEmpytElement (x:xs) = if x == ""
-            then removeEmpytElement xs
-            else x : removeEmpytElement xs
+          headingSplit :: [String]
+          headingSplit = split heading
+
+processHTTP :: Config -> String -> (String, FilePath)
+processHTTP conf query = checkHTTP conf $ lines query
+
 
 loger :: Config -> SockAddr -> String -> IO ()
 loger conf addr request = do
