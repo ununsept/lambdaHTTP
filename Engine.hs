@@ -23,10 +23,17 @@ import           Mime
 data StatusCodes =
       OK
     | NotFound
+    | BadRequest
     deriving (Show)
 
 data Fields = Fields
-    { hostField :: Maybe String
+    { hostField            :: Maybe String
+    , acceptField          :: Maybe String
+    , acceptCharsetField   :: Maybe String
+    , acceptEncodingField  :: Maybe String
+    , acceptLanguageField  :: Maybe String
+    , acceptDatetimeField  :: Maybe String
+    , userAgentField       :: Maybe String
     } deriving (Show)
 
 
@@ -44,7 +51,13 @@ date = undefined
 
 defaultFields :: Fields
 defaultFields = Fields
-    { hostField = Nothing
+    { hostField            = Nothing
+    , acceptField          = Nothing
+    , acceptCharsetField   = Nothing
+    , acceptEncodingField  = Nothing
+    , acceptLanguageField  = Nothing
+    , acceptDatetimeField  = Nothing
+    , userAgentField       = Nothing
     }
 
 split :: String -> [String]
@@ -58,8 +71,8 @@ split s = removeEmpytElement(splitOneOf " \n\r" s)
 
 ignoreLR :: String -> String
 ignoreLR x = if last x == '\r'
-  then init x
-  else x
+    then init x
+    else x
 
 splitTwo :: Char ->  String -> (String,String)
 splitTwo _ []     = ("","")
@@ -69,13 +82,15 @@ splitTwo d (x:xs) = if d == x
 
 getStatus :: StatusCodes -> String
 getStatus status = case status of
-    OK       -> "HTTP/1.1 200 OK\r\n"
-    NotFound -> "HTTP/1.1 404 Not Found\r\n"
+    OK         -> "HTTP/1.1 200 OK\r\n"
+    NotFound   -> "HTTP/1.1 404 Not Found\r\n"
+    BadRequest -> "HTTP/1.1 400 Bad Request\r\n"
 
 headers :: Header -> String
 headers hederConf = concat
     [ contentLanguageHeder
     , serverHeder
+    , pragmaHeder
     ]
     where
           contentLanguageHeder :: String
@@ -83,8 +98,12 @@ headers hederConf = concat
               Just a  -> "Content-Language: " ++ a ++  "\r\n"
               Nothing -> ""
           serverHeder :: String
-          serverHeder = case contentLanguage hederConf of
-              Just a  -> "Host: " ++ a ++  "\r\n"
+          serverHeder = case server hederConf of
+              Just a  -> "Server: " ++ a ++  "\r\n"
+              Nothing -> ""
+          pragmaHeder :: String
+          pragmaHeder = case server hederConf of
+              Just a  -> "Pragma: " ++ a ++  "\r\n"
               Nothing -> ""
 
 requestHeader :: Config -> StatusCodes -> FilePath -> String
@@ -105,13 +124,26 @@ parsFields (x:xs) f = parsFields xs (foundField f x)
           foundField :: Fields -> String -> Fields
           foundField fields field = parsField fields (splitTwo ' ' field)
           parsField :: Fields -> (String, String) -> Fields
-          parsField fields ("Host:", x) = fields { hostField = Just  x }
-          parsField fields (_, _)       = fields
+          parsField fields ("Host:",            x) =
+              fields { hostField           = Just  x }
+          parsField fields ("Accept:",          x) =
+              fields { acceptField         = Just  x }
+          parsField fields ("Accept-Charset:",  x) =
+              fields { acceptCharsetField  = Just  x }
+          parsField fields ("Accept-Encoding:", x) =
+              fields { acceptEncodingField = Just  x }
+          parsField fields ("Accept-Language:", x) =
+              fields { acceptLanguageField = Just  x }
+          parsField fields ("Accept-Datetime:", x) =
+              fields { acceptDatetimeField = Just  x }
+          parsField fields ("User-Agent:", x) =
+              fields { userAgentField      = Just  x }
+          parsField fields (_, _)                  = fields
 
 requestGet :: Config -> String -> [String] -> (String, FilePath)
 requestGet conf path field = case searchHost of
     Just a  -> requestMake conf a path
-    Nothing -> (requestHeader conf NotFound (status404 conf), status404 conf)
+    Nothing -> (requestHeader conf BadRequest (status400 conf), status404 conf)
     where
           searchHost :: Maybe Int
           searchHost = case (hostField $ parsFields field defaultFields) of
